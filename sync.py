@@ -92,7 +92,9 @@ for item in root.findall("./channel/item")[:POST_LIMIT]:
             parts.query,
             parts.fragment
         ))
-
+    # Convert image URLs to secure HTTPS.
+    if image.startswith("http://"):
+        image = image.replace("http://", "https://", 1)
     posts.append({
         "title": title,
         "url": link,
