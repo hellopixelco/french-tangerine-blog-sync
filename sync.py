@@ -1,113 +1,73 @@
-import json
-import urllib.request
-import xml.etree.ElementTree as ET
-from urllib.parse import urlsplit, urlunsplit, urljoin
-from html.parser import HTMLParser
+name: Sync Squarespace Blog
 
-RSS_URL = "https://the-french-tangerine-blog.squarespace.com/blog?format=rss"
-BLOG_DOMAIN = "www.thefrenchtangerine.com"
-POST_LIMIT = 6
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+permissions:
+  contents: write
+  pages: write
+  id-token: write
 
-namespaces = {
-    "media": "http://search.yahoo.com/mrss/"
-}
+concurrency:
+  group: blog-sync
+  cancel-in-progress: false
 
+jobs:
+  sync:
+    runs-on: ubuntu-latest
 
-class ImageParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.images = {}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
-    def handle_starttag(self, tag, attrs):
-        if tag == "meta":
-            attrs = dict(attrs)
-            key = attrs.get("property") or attrs.get("name")
-            if key in ("og:image", "twitter:image"):
-                self.images[key] = attrs.get("content", "")
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
 
+      - name: Sync blog posts
+        run: python sync.py
 
-def get_featured_image(url):
-    try:
-        request = urllib.request.Request(url, headers=HEADERS)
+      - name: Commit updated posts
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add posts.json
 
-        with urllib.request.urlopen(request, timeout=30) as response:
-            html = response.read().decode("utf-8", errors="replace")
+          if git diff --cached --quiet; then
+            echo "No new blog posts."
+          else
+            git commit -m "Update latest blog posts"
+            git pull --rebase origin main
+            git push origin main
+          fi
 
-        parser = ImageParser()
-        parser.feed(html)
+      - name: Prepare public feed
+        run: |
+          mkdir -p public
+          cp posts.json public/posts.json
 
-        image = (
-            parser.images.get("og:image")
-            or parser.images.get("twitter:image")
-            or ""
-        )
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
 
-        return urljoin(url, image) if image else ""
+      - name: Upload public feed
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
 
-    except Exception as error:
-        print(f"Image lookup failed: {error}")
-        return ""
+  deploy:
+    needs: sync
+    runs-on: ubuntu-latest
 
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
 
-request = urllib.request.Request(RSS_URL, headers=HEADERS)
-
-with urllib.request.urlopen(request, timeout=30) as response:
-    root = ET.fromstring(response.read())
-
-posts = []
-
-for item in root.findall("./channel/item")[:POST_LIMIT]:
-    title = item.findtext("title", "")
-    link = item.findtext("link", "")
-    image = ""
-
-    # First, check the RSS feed for an image.
-    for tag in ["media:content", "media:thumbnail"]:
-        for element in item.findall(".//" + tag, namespaces):
-            if element.get("url"):
-                image = element.get("url")
-                break
-        if image:
-            break
-
-    if not image:
-        enclosure = item.find("enclosure")
-        if enclosure is not None:
-            if enclosure.get("type", "").startswith("image/"):
-                image = enclosure.get("url", "")
-
-    # If no RSS image exists, visit the blog post.
-    if not image and link:
-        image = get_featured_image(link)
-
-    # Use the branded blog domain for Shopify links.
-    if link:
-        parts = urlsplit(link)
-        link = urlunsplit((
-            "https",
-            BLOG_DOMAIN,
-            parts.path,
-            parts.query,
-            parts.fragment
-        ))
-
-    posts.append({
-        "title": title,
-        "url": link,
-        "image": image,
-        "date": item.findtext("pubDate", "")
-    })
-
-if not posts:
-    raise RuntimeError("No blog posts found in RSS feed.")
-
-with open("posts.json", "w", encoding="utf-8") as file:
-    json.dump(posts, file, indent=2, ensure_ascii=False)
-
-print(f"Successfully synced {len(posts)} blog posts.")
-
-for post in posts:
-    print(post["title"])
-    print(f"Image: {post['image'] or 'NOT FOUND'}")
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
